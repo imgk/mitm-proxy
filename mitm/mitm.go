@@ -1,11 +1,13 @@
 package mitm
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -279,6 +282,33 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 		}
 		rr.Header = header
 
+		func(rr *http.Request) {
+			if rr.ProtoMajor != 2 {
+				return
+			}
+			if length := rr.Header.Get("Content-Length"); length != "" {
+				n, err := strconv.Atoi(length)
+				if err != nil {
+					log.Printf("parse Content-Length error: %v\n", err)
+					return
+				}
+				if n > (32 << 10) {
+					return
+				}
+
+				b, err := ioutil.ReadAll(r.Body)
+				if err != nil {
+					log.Printf("read r.Body all error: %v\n", err)
+					return
+				}
+
+				rr.Body = ioutil.NopCloser(bytes.NewReader(b))
+				rr.GetBody = func() (io.ReadCloser, error) {
+					return ioutil.NopCloser(bytes.NewReader(b)), nil
+				}
+			}
+		}(&rr)
+
 		rr.Close = false
 
 		return &rr
@@ -373,14 +403,18 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 				if ce := (*websocket.CloseError)(nil); errors.As(err, &ce) {
 					switch ce.Code {
 					case websocket.CloseNormalClosure:
+						return
 					case websocket.CloseGoingAway:
+						return
 					case websocket.CloseNoStatusReceived:
+						return
 					default:
-						log.Printf("websocket(%v) error: %v\n", direction, err)
 					}
-				} else {
-					log.Printf("websocket(%v) error: %v\n", direction, err)
 				}
+				if errors.Is(err, websocket.ErrCloseSent) {
+					return
+				}
+				log.Printf("websocket(%v) error: %v\n", direction, err)
 			}
 		}
 		checkErr("rc -> c", err)
