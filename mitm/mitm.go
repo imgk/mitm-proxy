@@ -24,6 +24,12 @@ import (
 
 	"github.com/imgk/mitm-proxy/adblock"
 	"github.com/imgk/mitm-proxy/gencert"
+	"github.com/imgk/mitm-proxy/pipe"
+)
+
+var (
+	AddrPort80  = pipe.ResolveAddr(":80")
+	AddrPort443 = pipe.ResolveAddr(":443")
 )
 
 func Run() {
@@ -141,11 +147,11 @@ func (s *Server) Serve() error {
 	if err != nil {
 		return err
 	}
-	l2, err := Listen(AddrPort80)
+	l2, err := pipe.Listen(AddrPort80)
 	if err != nil {
 		return err
 	}
-	l3, err := Listen(AddrPort443)
+	l3, err := pipe.Listen(AddrPort443)
 	if err != nil {
 		return err
 	}
@@ -215,10 +221,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch port {
 	case "80":
 		// log.Printf("handle http request from %v to %v\n", r.RemoteAddr, r.Host)
-		rc, err = Dial(AddrPort80)
+		rc, err = pipe.Dial(AddrPort80)
 	case "443":
 		// log.Printf("handle https request from %v to %v\n", r.RemoteAddr, r.Host)
-		rc, err = Dial(AddrPort443)
+		rc, err = pipe.Dial(AddrPort443)
 	default:
 		// log.Printf("reject https request from %v to %v\n", r.RemoteAddr, r.Host)
 		return
