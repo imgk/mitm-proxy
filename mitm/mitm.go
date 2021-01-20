@@ -368,7 +368,7 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
-		checkErr := func(err error) {
+		checkErr := func(direction string, err error) {
 			if err != nil {
 				if ce := (*websocket.CloseError)(nil); errors.As(err, &ce) {
 					switch ce.Code {
@@ -376,16 +376,16 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 					case websocket.CloseGoingAway:
 					case websocket.CloseNoStatusReceived:
 					default:
-						log.Printf("websocket(rc -> c) error: %v\n", err)
+						log.Printf("websocket(%v) error: %v\n", direction, err)
 					}
 				} else {
-					log.Printf("websocket(rc -> c) error: %v\n", err)
+					log.Printf("websocket(%v) error: %v\n", direction, err)
 				}
 			}
 		}
-		checkErr(err)
+		checkErr("rc -> c", err)
 		err = <-errCh
-		checkErr(err)
+		checkErr("c -> rc", err)
 		return
 	}
 
