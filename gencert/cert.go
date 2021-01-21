@@ -74,8 +74,8 @@ func (c *CertificateCache) CreateCert(commonName string) (cert *tls.Certificate,
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:       []string{"Hyperfox Fake Certificates"},
-			OrganizationalUnit: []string{"Hyperfox Fake Certificates"},
+			Organization:       []string{"imgk.cc Fake Certificates"},
+			OrganizationalUnit: []string{"imgk.cc Fake Certificates"},
 			CommonName:         commonName,
 		},
 		NotBefore:             time.Now().AddDate(0, 0, -7),
