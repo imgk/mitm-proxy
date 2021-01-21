@@ -114,15 +114,22 @@ type Server struct {
 	Dialer   websocket.Dialer
 	Upgrader websocket.Upgrader
 
+	// tls.Config to generate fake certificate
 	cfg tls.Config
 
-	srv   http.Server
+	// proxy server
+	srv http.Server
+	// http server
 	msrv1 http.Server
+	// https server
 	msrv2 http.Server
 
+	// http1
 	t1 *http.Transport
+	// http2
 	t2 *http2.Transport
 
+	// filter request with rules written in Adblock Plus rule type
 	matcher *adblock.RuleMatcher
 }
 
@@ -132,6 +139,7 @@ func NewServer(addr, cert, key, proxy, rules string) (*Server, error) {
 	t1 := &http.Transport{
 		Proxy: nil,
 	}
+	// set proxy for http1
 	if proxy != "" {
 		u, err := url.Parse(proxy)
 		if err != nil {
@@ -146,6 +154,7 @@ func NewServer(addr, cert, key, proxy, rules string) (*Server, error) {
 			return u, nil
 		}
 	}
+	// set proxy for http2
 	t2, err := http2.ConfigureTransports(t1)
 	if err != nil {
 		return nil, err
@@ -206,8 +215,11 @@ func (s *Server) Serve() error {
 		return err
 	}
 
+	// proxy
 	go s.srv.Serve(l1)
+	// serve http
 	go s.msrv1.Serve(l2)
+	// serve https
 	go s.msrv2.Serve(tls.NewListener(l3, &s.cfg))
 	return nil
 }
@@ -221,16 +233,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}()
 
-	// log.Printf("new connection from %v\n", r.RemoteAddr)
-	// log.Println(r.URL.Host)
-	// log.Println(r.Method)
-	// log.Println(r.Host)
-	// GET http proxy
+	// http proxy method GET
 	if r.Method == http.MethodGet && r.URL.Host != "" {
 		s.ServeMITM(w, r)
 		return
 	}
-	// redirect non CONNECT method and non HTTP/1.1
+	// redirect non CONNECT method
 	if r.Method != http.MethodConnect {
 		http.DefaultServeMux.ServeHTTP(w, r)
 		return
@@ -290,7 +298,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		CloseWrite() error
 	}
 
-	errCh := make(chan error)
+	// rc -> conn
+	errCh := make(chan error, 1)
 	go func(conn, rc net.Conn, errCh chan error) {
 		_, err := io.Copy(conn, rc)
 		if closer, ok := conn.(CloseWriter); ok {
@@ -299,6 +308,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		errCh <- err
 	}(conn, rc, errCh)
 
+	// conn -> rc
 	_, err = io.Copy(rc, conn)
 	if closer, ok := rc.(CloseWriter); ok {
 		closer.CloseWrite()
@@ -321,6 +331,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func copyRequest(r *http.Request) (*http.Request, error) {
 	rr := *r
 
+	// copy Request.URL
 	url := *r.URL
 	url.Host = r.Host
 	if websocket.IsWebSocketUpgrade(r) {
@@ -338,6 +349,7 @@ func copyRequest(r *http.Request) (*http.Request, error) {
 	}
 	rr.URL = &url
 
+	// clone Request.Header
 	header := r.Header.Clone()
 	if header.Get("Host") == "" {
 		header.Add("Host", rr.Host)
@@ -374,6 +386,7 @@ func copyRequest(r *http.Request) (*http.Request, error) {
 		return ioutil.NopCloser(bytes.NewReader(b)), nil
 	}
 
+	//
 	rr.Close = false
 
 	return &rr, nil
@@ -388,17 +401,14 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 		return
 	}()
 
-	// log.Printf("handle request from %v to %v\n", r.RemoteAddr, r.Host)
+	// copy http.Request
 	rr, err := copyRequest(r)
 	if err != nil {
 		log.Printf("CopyRequest error: %v\n", err)
 		return
 	}
-	// log.Printf("relay http request %v\n", rr.URL.String())
 
 	// filter request
-	// https://pkg.go.dev/regexp#Regexp.Match
-	// log.Printf("filter request %v\n", r.URL.String())
 	if s.matcher != nil {
 		b, _, err := s.matcher.Match(&adblock.Request{
 			URL:     rr.URL.String(),
@@ -471,18 +481,13 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
 			return
 		}
-		// log.Println(rr.Method)
-		// log.Println(resp.StatusCode)
 		log.Printf("io.Copy error: %v\n", err)
 	}
 }
 
 // ServeWebSocket is ...
 func (s *Server) ServeWebSocket(w http.ResponseWriter, rr, r *http.Request) {
-	// log.Println("currently mitm-proxy does not support websocket")
-	// http.HandlerFunc(http.NotFound).ServeHTTP(w, r)
-	// log.Printf("handle websocket: %s \n", rr.Header)
-	// log.Println("handle websocket")
+	// remove duplicated header
 	for _, k := range []string{
 		"Sec-Websocket-Extensions",
 		"Sec-Websocket-Version",
@@ -510,10 +515,8 @@ func (s *Server) ServeWebSocket(w http.ResponseWriter, rr, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	// upgrade will hijack underlying net.Conn, reset read/write deadline
-	// c.SetReadDeadline(time.Time{})
-	// c.SetWriteDeadline(time.Time{})
 
+	// c -> rc
 	errCh := make(chan error, 1)
 	go func(c, rc *websocket.Conn, errCh chan error) {
 		for {
@@ -530,6 +533,7 @@ func (s *Server) ServeWebSocket(w http.ResponseWriter, rr, r *http.Request) {
 		rc.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
 	}(c, rc, errCh)
 
+	// rc -> c
 	for {
 		n, b, e := rc.ReadMessage()
 		if e != nil {
