@@ -6,17 +6,20 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
 	"time"
+
+	// add http.pprof
+	_ "net/http/pprof"
 
 	"golang.org/x/net/http2"
 
@@ -24,14 +27,58 @@ import (
 
 	"github.com/imgk/mitm-proxy/adblock"
 	"github.com/imgk/mitm-proxy/gencert"
-	"github.com/imgk/mitm-proxy/pipe"
 )
 
 var (
-	AddrPort80  = pipe.ResolveAddr(":80")
-	AddrPort443 = pipe.ResolveAddr(":443")
+	// AddrPort80 is ...
+	AddrPort80 = (*net.TCPAddr)(nil)
+	// AddrPort443 is ...
+	AddrPort443 = (*net.TCPAddr)(nil)
 )
 
+func init() {
+	var (
+		port80  string
+		port443 string
+	)
+	if s := os.Getenv("ADDR_PORT_HTTP"); s == "" {
+		port80 = "127.0.0.1:80"
+	} else {
+		port80 = s
+	}
+	if s := os.Getenv("ADDR_PORT_HTTPS"); s == "" {
+		port443 = "127.0.0.1:443"
+	} else {
+		port443 = s
+	}
+	addr, err := ResolveAddr(port80)
+	if err != nil {
+		log.Panic(err)
+	}
+	AddrPort80 = addr
+	addr, err = ResolveAddr(port443)
+	if err != nil {
+		log.Panic(err)
+	}
+	AddrPort443 = addr
+}
+
+// ResolveAddr is ...
+func ResolveAddr(s string) (*net.TCPAddr, error) {
+	return net.ResolveTCPAddr("tcp", s)
+}
+
+// Listen is ...
+func Listen(addr *net.TCPAddr) (net.Listener, error) {
+	return net.ListenTCP("tcp", addr)
+}
+
+// Dial is ...
+func Dial(addr *net.TCPAddr) (net.Conn, error) {
+	return net.DialTCP("tcp", nil, addr)
+}
+
+// Run is ...
 func Run() {
 	var conf struct {
 		Cert    string
@@ -61,6 +108,7 @@ func Run() {
 	<-sigCh
 }
 
+// Server is ...
 type Server struct {
 	Addr     string
 	Dialer   websocket.Dialer
@@ -78,6 +126,7 @@ type Server struct {
 	matcher *adblock.RuleMatcher
 }
 
+// NewServer is ...
 func NewServer(addr, cert, key, proxy, rules string) (*Server, error) {
 	// configure proxy
 	t1 := &http.Transport{
@@ -142,16 +191,17 @@ func NewServer(addr, cert, key, proxy, rules string) (*Server, error) {
 	return s, nil
 }
 
+// Serve is ...
 func (s *Server) Serve() error {
 	l1, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return err
 	}
-	l2, err := pipe.Listen(AddrPort80)
+	l2, err := Listen(AddrPort80)
 	if err != nil {
 		return err
 	}
-	l3, err := pipe.Listen(AddrPort443)
+	l3, err := Listen(AddrPort443)
 	if err != nil {
 		return err
 	}
@@ -180,11 +230,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ServeMITM(w, r)
 		return
 	}
-	// redirect non CONNECT method and non HTTP1.1
+	// redirect non CONNECT method and non HTTP/1.1
 	if r.Method != http.MethodConnect {
 		http.DefaultServeMux.ServeHTTP(w, r)
 		return
 	}
+	// only allow HTTP/1.1
 	if r.ProtoMajor != 1 {
 		http.DefaultServeMux.ServeHTTP(w, r)
 		return
@@ -221,10 +272,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch port {
 	case "80":
 		// log.Printf("handle http request from %v to %v\n", r.RemoteAddr, r.Host)
-		rc, err = pipe.Dial(AddrPort80)
+		rc, err = Dial(AddrPort80)
 	case "443":
 		// log.Printf("handle https request from %v to %v\n", r.RemoteAddr, r.Host)
-		rc, err = pipe.Dial(AddrPort443)
+		rc, err = Dial(AddrPort443)
 	default:
 		// log.Printf("reject https request from %v to %v\n", r.RemoteAddr, r.Host)
 		return
@@ -240,9 +291,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	errCh := make(chan error)
-	go func(c, rc net.Conn, errCh chan error) {
-		_, err := io.Copy(c, rc)
-		if closer, ok := c.(CloseWriter); ok {
+	go func(conn, rc net.Conn, errCh chan error) {
+		_, err := io.Copy(conn, rc)
+		if closer, ok := conn.(CloseWriter); ok {
 			closer.CloseWrite()
 		}
 		errCh <- err
@@ -252,15 +303,83 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if closer, ok := rc.(CloseWriter); ok {
 		closer.CloseWrite()
 	}
-	if err == nil {
-		<-errCh
-		return
+
+	checkErr := func(direction string, err error) {
+		if err == nil {
+			return
+		}
+		log.Printf("relay (%v) CONNECT error: %v\n", direction, err)
 	}
-	<-errCh
+
+	checkErr("c -> rc", err)
+	err = <-errCh
+	checkErr("rc -> c", err)
 	return
 }
 
-// mitm proxy
+// copy http.Request
+func copyRequest(r *http.Request) (*http.Request, error) {
+	rr := *r
+
+	url := *r.URL
+	url.Host = r.Host
+	if websocket.IsWebSocketUpgrade(r) {
+		if r.TLS == nil {
+			url.Scheme = "ws"
+		} else {
+			url.Scheme = "wss"
+		}
+	} else {
+		if r.TLS == nil {
+			url.Scheme = "http"
+		} else {
+			url.Scheme = "https"
+		}
+	}
+	rr.URL = &url
+
+	header := r.Header.Clone()
+	if header.Get("Host") == "" {
+		header.Add("Host", rr.Host)
+	}
+	rr.Header = header
+
+	// copy request body for HTTP/2
+	if rr.ProtoMajor != 2 {
+		return &rr, nil
+	}
+
+	// get length
+	length := rr.Header.Get("Content-Length")
+	if length == "" {
+		return &rr, nil
+	}
+	n, err := strconv.Atoi(length)
+	if err != nil {
+		return nil, fmt.Errorf("parse Content-Length error: %w", err)
+	}
+	// ignore big body
+	if n > (32 << 10) {
+		return &rr, nil
+	}
+
+	b, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read r.Body all error: %w", err)
+	}
+
+	// add http.Request.GetBody
+	rr.Body = ioutil.NopCloser(bytes.NewReader(b))
+	rr.GetBody = func() (io.ReadCloser, error) {
+		return ioutil.NopCloser(bytes.NewReader(b)), nil
+	}
+
+	rr.Close = false
+
+	return &rr, nil
+}
+
+// ServeMITM is ...
 func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -270,55 +389,11 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// log.Printf("handle request from %v to %v\n", r.RemoteAddr, r.Host)
-	rr := func(r *http.Request) *http.Request {
-		rr := *r
-
-		url := *r.URL
-		url.Host = r.Host
-		if r.TLS == nil {
-			url.Scheme = "http"
-		} else {
-			url.Scheme = "https"
-		}
-		rr.URL = &url
-
-		header := r.Header.Clone()
-		if header.Get("Host") == "" {
-			header.Add("Host", rr.Host)
-		}
-		rr.Header = header
-
-		func(rr *http.Request) {
-			if rr.ProtoMajor != 2 {
-				return
-			}
-			if length := rr.Header.Get("Content-Length"); length != "" {
-				n, err := strconv.Atoi(length)
-				if err != nil {
-					log.Printf("parse Content-Length error: %v\n", err)
-					return
-				}
-				if n > (32 << 10) {
-					return
-				}
-
-				b, err := ioutil.ReadAll(r.Body)
-				if err != nil {
-					log.Printf("read r.Body all error: %v\n", err)
-					return
-				}
-
-				rr.Body = ioutil.NopCloser(bytes.NewReader(b))
-				rr.GetBody = func() (io.ReadCloser, error) {
-					return ioutil.NopCloser(bytes.NewReader(b)), nil
-				}
-			}
-		}(&rr)
-
-		rr.Close = false
-
-		return &rr
-	}(r)
+	rr, err := copyRequest(r)
+	if err != nil {
+		log.Printf("CopyRequest error: %v\n", err)
+		return
+	}
 	// log.Printf("relay http request %v\n", rr.URL.String())
 
 	// filter request
@@ -342,90 +417,8 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// handle websocket
-	if websocket.IsWebSocketUpgrade(r) {
-		// log.Println("currently mitm-proxy does not support websocket")
-		// http.HandlerFunc(http.NotFound).ServeHTTP(w, r)
-		// log.Printf("handle websocket: %s \n", rr.Header)
-		// log.Println("handle websocket")
-		if r.TLS == nil {
-			rr.URL.Scheme = "ws"
-		} else {
-			rr.URL.Scheme = "wss"
-		}
-		for _, k := range []string{
-			"Sec-Websocket-Extensions",
-			"Sec-Websocket-Version",
-			"Sec-Websocket-Key",
-			"Connection",
-			"Upgrade",
-		} {
-			rr.Header.Del(k)
-		}
-		rc, _, err := s.Dialer.Dial(rr.URL.String(), rr.Header)
-		if err != nil {
-			http.HandlerFunc(http.NotFound).ServeHTTP(w, r)
-			log.Printf("dial websocket error: %v\n", err)
-			return
-		}
-		defer rc.Close()
-		header := make(http.Header)
-		c, err := s.Upgrader.Upgrade(w, r, header)
-		if err != nil {
-			log.Printf("upgrade websocket error: %v\n", err)
-			return
-		}
-		defer c.Close()
-
-		errCh := make(chan error, 1)
-		go func(c, rc *websocket.Conn, errCh chan error) {
-			for {
-				n, b, err := c.ReadMessage()
-				if err != nil {
-					errCh <- err
-					break
-				}
-				if err := rc.WriteMessage(n, b); err != nil {
-					errCh <- err
-					break
-				}
-			}
-			rc.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
-		}(c, rc, errCh)
-
-		for {
-			n, b, er := rc.ReadMessage()
-			if er != nil {
-				err = er
-				break
-			}
-			if er := c.WriteMessage(n, b); er != nil {
-				err = er
-				break
-			}
-		}
-		c.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
-		checkErr := func(direction string, err error) {
-			if err != nil {
-				if ce := (*websocket.CloseError)(nil); errors.As(err, &ce) {
-					switch ce.Code {
-					case websocket.CloseNormalClosure:
-						return
-					case websocket.CloseGoingAway:
-						return
-					case websocket.CloseNoStatusReceived:
-						return
-					default:
-					}
-				}
-				if errors.Is(err, websocket.ErrCloseSent) {
-					return
-				}
-				log.Printf("websocket(%v) error: %v\n", direction, err)
-			}
-		}
-		checkErr("rc -> c", err)
-		err = <-errCh
-		checkErr("c -> rc", err)
+	if rr.URL.Scheme[0] == 'w' {
+		s.ServeWebSocket(w, rr, r)
 		return
 	}
 
@@ -482,4 +475,96 @@ func (s *Server) ServeMITM(w http.ResponseWriter, r *http.Request) {
 		// log.Println(resp.StatusCode)
 		log.Printf("io.Copy error: %v\n", err)
 	}
+}
+
+// ServeWebSocket is ...
+func (s *Server) ServeWebSocket(w http.ResponseWriter, rr, r *http.Request) {
+	// log.Println("currently mitm-proxy does not support websocket")
+	// http.HandlerFunc(http.NotFound).ServeHTTP(w, r)
+	// log.Printf("handle websocket: %s \n", rr.Header)
+	// log.Println("handle websocket")
+	for _, k := range []string{
+		"Sec-Websocket-Extensions",
+		"Sec-Websocket-Version",
+		"Sec-Websocket-Key",
+		"Connection",
+		"Upgrade",
+	} {
+		rr.Header.Del(k)
+	}
+
+	// dial remote
+	rc, _, err := s.Dialer.Dial(rr.URL.String(), rr.Header)
+	if err != nil {
+		http.HandlerFunc(http.NotFound).ServeHTTP(w, rr)
+		log.Printf("dial websocket error: %v\n", err)
+		return
+	}
+	defer rc.Close()
+
+	// upgrade local
+	header := make(http.Header)
+	c, err := s.Upgrader.Upgrade(w, r, header)
+	if err != nil {
+		log.Printf("upgrade websocket error: %v\n", err)
+		return
+	}
+	defer c.Close()
+	// upgrade will hijack underlying net.Conn, reset read/write deadline
+	// c.SetReadDeadline(time.Time{})
+	// c.SetWriteDeadline(time.Time{})
+
+	errCh := make(chan error, 1)
+	go func(c, rc *websocket.Conn, errCh chan error) {
+		for {
+			n, b, err := c.ReadMessage()
+			if err != nil {
+				errCh <- err
+				break
+			}
+			if err := rc.WriteMessage(n, b); err != nil {
+				errCh <- err
+				break
+			}
+		}
+		rc.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
+	}(c, rc, errCh)
+
+	for {
+		n, b, e := rc.ReadMessage()
+		if e != nil {
+			err = e
+			break
+		}
+		if err = c.WriteMessage(n, b); err != nil {
+			break
+		}
+	}
+	c.WriteControl(websocket.CloseMessage, nil, time.Now().Add(5*time.Second))
+
+	checkErr := func(direction string, err error) {
+		if err == nil {
+			return
+		}
+		if ce := (*websocket.CloseError)(nil); errors.As(err, &ce) {
+			switch ce.Code {
+			case websocket.CloseNormalClosure:
+				return
+			case websocket.CloseGoingAway:
+				return
+			case websocket.CloseNoStatusReceived:
+				return
+			default:
+			}
+		}
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return
+		}
+		log.Printf("websocket (%v) error: %v\n", direction, err)
+	}
+
+	checkErr("rc -> c", err)
+	err = <-errCh
+	checkErr("c -> rc", err)
+	return
 }
