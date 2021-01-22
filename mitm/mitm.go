@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"time"
 
 	// add http.pprof
@@ -150,9 +149,7 @@ func NewServer(addr, cert, key, proxy, rules string) (*Server, error) {
 		default:
 			return nil, errors.New("proxy scheme error")
 		}
-		t1.Proxy = func(r *http.Request) (*url.URL, error) {
-			return u, nil
-		}
+		t1.Proxy = http.ProxyURL(u)
 	}
 	// set proxy for http2
 	t2, err := http2.ConfigureTransports(t1)
@@ -362,16 +359,9 @@ func copyRequest(r *http.Request) (*http.Request, error) {
 	}
 
 	// get length
-	length := rr.Header.Get("Content-Length")
-	if length == "" {
-		return &rr, nil
-	}
-	n, err := strconv.Atoi(length)
-	if err != nil {
-		return nil, fmt.Errorf("parse Content-Length error: %w", err)
-	}
+	n := r.ContentLength
 	// ignore big body
-	if n > (32 << 10) {
+	if n < 1 || n > (32<<10) {
 		return &rr, nil
 	}
 

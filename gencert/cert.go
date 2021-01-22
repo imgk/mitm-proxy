@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/idna"
 )
 
+// CertificateCache is ...
 type CertificateCache struct {
 	sync.RWMutex
 	rootCert string
@@ -26,16 +27,27 @@ type CertificateCache struct {
 	cache    map[string]*tls.Certificate
 }
 
+// NewCertificateCache is ...
 func NewCertificateCache(cert, key string) (c *CertificateCache, err error) {
 	c = &CertificateCache{
 		rootCert: cert,
 		rootKey:  key,
 	}
 	c.cert, err = tls.LoadX509KeyPair(c.rootCert, c.rootKey)
+	if err != nil {
+		return
+	}
+
+	c.cert.Leaf, err = x509.ParseCertificate(c.cert.Certificate[0])
+	if err != nil {
+		return
+	}
+
 	c.cache = make(map[string]*tls.Certificate)
 	return
 }
 
+// GetCertificate is ...
 func (c *CertificateCache) GetCertificate(clientHello *tls.ClientHelloInfo) (cert *tls.Certificate, err error) {
 	commonName, err := idna.ToASCII(clientHello.ServerName)
 	if err != nil {
@@ -54,7 +66,7 @@ func (c *CertificateCache) GetCertificate(clientHello *tls.ClientHelloInfo) (cer
 	return
 }
 
-// CreateKeyPair creates a key pair for the given hostname on the fly.
+// CreateCert is ...
 func (c *CertificateCache) CreateCert(commonName string) (cert *tls.Certificate, err error) {
 	// log.Printf("generate cert for %v\n", commonName)
 
@@ -74,8 +86,8 @@ func (c *CertificateCache) CreateCert(commonName string) (cert *tls.Certificate,
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:       []string{"imgk.cc Fake Certificates"},
-			OrganizationalUnit: []string{"imgk.cc Fake Certificates"},
+			Organization:       []string{"Fake Certificates"},
+			OrganizationalUnit: []string{"Fake Certificates"},
 			CommonName:         commonName,
 		},
 		NotBefore:             time.Now().AddDate(0, 0, -7),
@@ -92,12 +104,7 @@ func (c *CertificateCache) CreateCert(commonName string) (cert *tls.Certificate,
 		template.DNSNames = append(template.DNSNames, commonName)
 	}
 
-	rootCA := c.cert
-
-	if rootCA.Leaf, err = x509.ParseCertificate(rootCA.Certificate[0]); err != nil {
-		return
-	}
-
+	rootCA := &c.cert
 	template.AuthorityKeyId = rootCA.Leaf.SubjectKeyId
 
 	var priv *rsa.PrivateKey
