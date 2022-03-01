@@ -1,4 +1,4 @@
-package mitm
+package cmd
 
 import (
 	"bytes"
